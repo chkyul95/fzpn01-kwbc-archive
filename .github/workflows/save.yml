@@ -1,0 +1,71 @@
+name: Archive & Save NFDHSFEP1
+
+on:
+  schedule:
+    - cron: '45 1,4,7,10,13,16,19,22 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  archive-and-download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Download file and check for updates
+        id: check_update
+        env:
+          IA_ACCESS_KEY: ${{ secrets.IA_ACCESS_KEY }}
+          IA_SECRET_KEY: ${{ secrets.IA_SECRET_KEY }}
+        run: |
+          TARGET_URL="https://ocean.weather.gov/shtml/NFDHSFEP1.txt"
+          
+          mkdir -p data
+          TEMP_FILE="data/temp_download.txt"
+          
+          curl -fsSL "$TARGET_URL" -o "$TEMP_FILE"
+          
+          if [ -f "data/latest.txt" ] && cmp -s "$TEMP_FILE" "data/latest.txt"; then
+            echo "No changes in OPC data. Skipping save."
+            rm -f "$TEMP_FILE"
+            echo "has_update=false" >> $GITHUB_OUTPUT
+          else
+            YEAR=$(date -u +'%Y')
+            MONTH=$(date -u +'%m')
+            TIMESTAMP=$(date -u +'%Y%m%d_%H%M%S')
+            
+            TARGET_DIR="data/${YEAR}/${MONTH}"
+            mkdir -p "$TARGET_DIR"
+            
+            FILE_PATH="${TARGET_DIR}/nfdhsfep1_${TIMESTAMP}.txt"
+            mv "$TEMP_FILE" "$FILE_PATH"
+            cp "$FILE_PATH" data/latest.txt
+            
+            echo "Requesting Wayback Machine archive..."
+            IA_RES=$(curl -sSL --max-time 30 -X POST "https://web.archive.org/save" \
+              -H "Accept: application/json" \
+              -H "Authorization: LOW ${IA_ACCESS_KEY}:${IA_SECRET_KEY}" \
+              --data-urlencode "url=${TARGET_URL}" \
+              -d "force_get=1" \
+              -d "capture_all=1" \
+              -d "skip_first_archive=1" || true)
+
+            echo "Archive.org response: $IA_RES"
+            
+            echo "has_update=true" >> $GITHUB_OUTPUT
+            echo "Saved to $FILE_PATH and latest.txt"
+          fi
+
+      - name: Commit and Push changes
+        if: steps.check_update.outputs.has_update == 'true'
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          git add data/
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          git commit -m "Update NFDHSFEP1 data: ${TIMESTAMP}"
+          git push
